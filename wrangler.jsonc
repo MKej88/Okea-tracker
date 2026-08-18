@@ -16,7 +16,7 @@
     {
       "binding": "DB",
       "database_name": "okea-tracker-db",
-      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "database_id": "3018d9f0-a2bd-4498-a1da-f675fa194208",
       "migrations_dir": "migrations"
     }
   ],
