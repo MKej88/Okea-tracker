@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "okea-tracker",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-08-18",
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "okea-tracker-db",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["15 4 * * *"]
+  },
+  "vars": {
+    "APP_ENV": "production",
+    "DEFAULT_QUARTER": "2026Q3"
+  }
+}
