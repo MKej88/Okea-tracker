@@ -26,6 +26,13 @@ type ProductionRow = {
   tracker_share: number;
 };
 
+type EventRow = {
+  title: string;
+  impact_kboepd: number;
+  confidence: string;
+  source_note: string | null;
+};
+
 function round(value: number | null, digits = 2) {
   if (value === null || !Number.isFinite(value)) return null;
   const p = 10 ** digits;
@@ -48,6 +55,23 @@ export function parseQuarter(value: string): QuarterParts {
 
 function daysInMonth(year: number, month: number) {
   return new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
+
+function periodIndex(year: number, month: number) {
+  return year * 12 + (month - 1);
+}
+
+function periodLabel(year: number, month: number) {
+  return `${year}-${String(month).padStart(2, "0")}`;
+}
+
+function median(values: number[]) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 async function setting(db: D1Database, key: string, fallback: number) {
@@ -136,6 +160,38 @@ function productVolumesFromRow(row: ProductionRow, scaleDays = 1) {
   };
 }
 
+function choosePreQuarterBaseline(
+  history: ProductionRow[],
+  lookbackMonths: number,
+  anomalyFloorRatio: number,
+) {
+  const recent = history.slice(0, Math.max(1, lookbackMonths));
+  if (!recent.length) {
+    return { row: null as ProductionRow | null, method: "missing", medianRate: null as number | null };
+  }
+
+  const positive = recent.filter((r) => Number(r.company_est_kboepd) > 0.05);
+  if (!positive.length) {
+    return { row: recent[0], method: "latest-pre-quarter", medianRate: 0 };
+  }
+
+  const med = median(positive.map((r) => Number(r.company_est_kboepd))) ?? 0;
+  const latest = recent[0];
+  const latestRate = Number(latest.company_est_kboepd ?? 0);
+
+  if (med <= 0 || latestRate >= med * anomalyFloorRatio) {
+    return { row: latest, method: "latest-pre-quarter", medianRate: med };
+  }
+
+  const closestToMedian = positive.reduce((best, row) => {
+    const bestDistance = Math.abs(Number(best.company_est_kboepd) - med);
+    const rowDistance = Math.abs(Number(row.company_est_kboepd) - med);
+    return rowDistance < bestDistance ? row : best;
+  });
+
+  return { row: closestToMedian, method: "robust-median", medianRate: med };
+}
+
 export async function calculateNowcast(db: D1Database, quarter: string) {
   const q = parseQuarter(quarter);
   const fields = await db
@@ -146,15 +202,19 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
     .all<Field>();
   const rows = await loadProductionRows(db, q);
 
+  const lookbackMonths = await setting(db, "production_baseline_lookback_months", 6);
+  const anomalyFloorRatio = await setting(db, "production_anomaly_floor_ratio", 0.65);
+
   const currentByField = new Map<string, Map<number, ProductionRow>>();
   for (const row of rows.current) {
     if (!currentByField.has(row.field_key)) currentByField.set(row.field_key, new Map());
     currentByField.get(row.field_key)!.set(row.month, row);
   }
 
-  const priorByField = new Map<string, ProductionRow>();
+  const priorHistoryByField = new Map<string, ProductionRow[]>();
   for (const row of rows.prior) {
-    if (!priorByField.has(row.field_key)) priorByField.set(row.field_key, row);
+    if (!priorHistoryByField.has(row.field_key)) priorHistoryByField.set(row.field_key, []);
+    priorHistoryByField.get(row.field_key)!.push(row);
   }
 
   let weightedKboeDays = 0;
@@ -169,13 +229,15 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
 
   for (const field of fields.results) {
     const monthMap = currentByField.get(field.field_key) ?? new Map();
-    let lastRow = priorByField.get(field.field_key) ?? null;
+    const priorHistory = priorHistoryByField.get(field.field_key) ?? [];
+    const baseline = choosePreQuarterBaseline(priorHistory, lookbackMonths, anomalyFloorRatio);
+    let lastActual: ProductionRow | null = null;
     let fieldWeighted = 0;
     const months: Array<Record<string, unknown>> = [];
 
     for (const month of q.months) {
       const actual = monthMap.get(month) ?? null;
-      const source = actual ?? lastRow;
+      const source = actual ?? lastActual ?? baseline.row;
       const days = daysInMonth(q.year, month);
       if (actual) actualMonthCount += 1;
 
@@ -193,7 +255,7 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
         crudeBoe += v.crudeBoe;
         gasBoe += v.gasBoe;
         nglBoe += v.nglBoe;
-        lastRow = actual;
+        lastActual = actual;
       } else {
         const sourceDays = daysInMonth(source.year, source.month);
         const v = productVolumesFromRow(source, days / sourceDays);
@@ -205,7 +267,13 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
       months.push({
         month,
         status: actual ? "actual" : "estimated",
-        sourceMonth: actual ? month : `${source.year}-${String(source.month).padStart(2, "0")}`,
+        sourceMonth: actual ? periodLabel(q.year, month) : periodLabel(source.year, source.month),
+        baselineMethod: actual
+          ? "actual"
+          : lastActual
+            ? "carry-forward-current-quarter"
+            : baseline.method,
+        recentMedianKboepd: actual || lastActual ? undefined : round(baseline.medianRate),
         kboepd: round(rate),
       });
     }
@@ -214,20 +282,37 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
       fieldKey: field.field_key,
       field: field.display_name,
       quarterKboepd: round(fieldWeighted / quarterDays),
+      baselineMethod: baseline.method,
       months,
     });
   }
 
-  const eventAdjustment = await db
+  const eventRows = await db
     .prepare(
-      `SELECT COALESCE(SUM(impact_kboepd),0) AS impact
-       FROM events WHERE quarter=? AND impact_kboepd IS NOT NULL AND status <> 'cancelled'`,
+      `SELECT title, impact_kboepd, confidence, source_note
+       FROM events
+       WHERE quarter=? AND impact_kboepd IS NOT NULL AND status <> 'cancelled'
+       ORDER BY event_date, id`,
     )
     .bind(quarter)
-    .first<{ impact: number }>();
+    .all<EventRow>();
+  const eventAdjustment = eventRows.results.reduce(
+    (sum, event) => sum + Number(event.impact_kboepd ?? 0),
+    0,
+  );
 
   const productionBase = quarterDays > 0 ? weightedKboeDays / quarterDays : 0;
-  const productionKboepd = productionBase + Number(eventAdjustment?.impact ?? 0);
+  const productionKboepd = Math.max(0, productionBase + eventAdjustment);
+
+  const allRows = [...rows.current, ...rows.prior];
+  const latestSource = allRows.reduce<ProductionRow | null>((latest, row) => {
+    if (!latest) return row;
+    return periodIndex(row.year, row.month) > periodIndex(latest.year, latest.month) ? row : latest;
+  }, null);
+  const now = new Date();
+  const sourceLagMonths = latestSource
+    ? Math.max(0, periodIndex(now.getUTCFullYear(), now.getUTCMonth() + 1) - periodIndex(latestSource.year, latestSource.month))
+    : null;
 
   const explicitSold = await db
     .prepare(
@@ -290,8 +375,19 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
   const priceConfidence = brent.observations >= 20 && gas.observations >= 20 ? "high" : "low";
 
   const assumptions = {
-    productionMethod: "Actual SODIR field months; missing months carry forward latest field run-rate",
-    eventAdjustmentKboepd: round(Number(eventAdjustment?.impact ?? 0)),
+    productionMethod:
+      "Actual SODIR field months; if the quarter is not yet published, use a recent field baseline. A latest pre-quarter month below the anomaly threshold is replaced by the recent positive median so planned shutdown months are not treated as the new normal.",
+    productionBaselineLookbackMonths: lookbackMonths,
+    productionAnomalyFloorRatio: anomalyFloorRatio,
+    latestSodirSourceMonth: latestSource ? periodLabel(latestSource.year, latestSource.month) : null,
+    sodirLagMonths: sourceLagMonths,
+    eventAdjustmentKboepd: round(eventAdjustment),
+    eventAdjustments: eventRows.results.map((event) => ({
+      title: event.title,
+      impactKboepd: round(Number(event.impact_kboepd)),
+      confidence: event.confidence,
+      source: event.source_note,
+    })),
     soldRatio: round(soldRatio, 3),
     soldRatioSource: explicitSold
       ? `${explicitSold.signal_date}: ${explicitSold.source_note ?? "lifting signal"}`
@@ -309,8 +405,11 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
     production: {
       kboepd: round(productionKboepd),
       baseKboepd: round(productionBase),
+      eventAdjustmentKboepd: round(eventAdjustment),
       coverage: round(coverage * 100, 1),
       confidence: productionConfidence,
+      latestSourceMonth: latestSource ? periodLabel(latestSource.year, latestSource.month) : null,
+      sourceLagMonths,
       fields: fieldDetail,
     },
     lifting: {
@@ -346,7 +445,7 @@ export async function saveNowcastSnapshot(db: D1Database, quarter: string) {
         crude_usd_bbl, gas_usd_boe, ngl_usd_boe, petroleum_revenue_usdm,
         production_confidence, lifting_confidence, price_confidence,
         assumptions_json, model_version
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0.1.0')`,
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0.2.0')`,
     )
     .bind(
       quarter,
