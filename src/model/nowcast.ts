@@ -27,6 +27,7 @@ type ProductionRow = {
 };
 
 type EventRow = {
+  field_key: string | null;
   title: string;
   impact_kboepd: number;
   confidence: string;
@@ -192,6 +193,44 @@ function choosePreQuarterBaseline(
   return { row: closestToMedian, method: "robust-median", medianRate: med };
 }
 
+async function q3ProjectScenarios(db: D1Database, quarter: string, coreKboepd: number) {
+  if (quarter !== "2026Q3") {
+    return {
+      enabled: false,
+      coreKboepd,
+      bearKboepd: coreKboepd,
+      baseKboepd: coreKboepd,
+      bullKboepd: coreKboepd,
+      project: null,
+    };
+  }
+
+  const initialNet = await setting(db, "gws_q3_initial_net_kboepd", 6.5);
+  const bearContribution = await setting(db, "gws_q3_bear_contribution_kboepd", 0);
+  const baseContribution = await setting(db, "gws_q3_base_contribution_kboepd", 1.3);
+  const bullContribution = await setting(db, "gws_q3_bull_contribution_kboepd", 1.8);
+
+  return {
+    enabled: true,
+    coreKboepd,
+    bearKboepd: coreKboepd + bearContribution,
+    baseKboepd: coreKboepd + baseContribution,
+    bullKboepd: coreKboepd + bullContribution,
+    project: {
+      name: "Garn West South",
+      status: "expected-unconfirmed",
+      initialNetKboepd: initialNet,
+      contributionsKboepd: {
+        bear: bearContribution,
+        base: baseContribution,
+        bull: bullContribution,
+      },
+      note:
+        "Scenario overlay based on OKEA's Q2 2026 webcast: current plan was mid-August before the 2 September Draugen shutdown; initial net production was stated at approximately 6.5 kboepd and expected to decline. No start-up confirmation is assumed by the model.",
+    },
+  };
+}
+
 export async function calculateNowcast(db: D1Database, quarter: string) {
   const q = parseQuarter(quarter);
   const fields = await db
@@ -289,7 +328,7 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
 
   const eventRows = await db
     .prepare(
-      `SELECT title, impact_kboepd, confidence, source_note
+      `SELECT field_key, title, impact_kboepd, confidence, source_note
        FROM events
        WHERE quarter=? AND impact_kboepd IS NOT NULL AND status <> 'cancelled'
        ORDER BY event_date, id`,
@@ -302,7 +341,21 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
   );
 
   const productionBase = quarterDays > 0 ? weightedKboeDays / quarterDays : 0;
-  const productionKboepd = Math.max(0, productionBase + eventAdjustment);
+  const coreProductionKboepd = Math.max(0, productionBase + eventAdjustment);
+  const scenarios = await q3ProjectScenarios(db, quarter, coreProductionKboepd);
+  const productionKboepd = scenarios.baseKboepd;
+
+  // Keep product volumes consistent with the production bridge. Until event-specific
+  // product composition is modelled, negative/positive core event adjustments are
+  // applied pro-rata to the base field product mix. Q3 GWS is then added as crude-only.
+  const coreVolumeScale = productionBase > 0 ? coreProductionKboepd / productionBase : 1;
+  crudeBoe *= coreVolumeScale;
+  gasBoe *= coreVolumeScale;
+  nglBoe *= coreVolumeScale;
+  const gwsBaseContribution = scenarios.project?.contributionsKboepd.base ?? 0;
+  if (gwsBaseContribution > 0) {
+    crudeBoe += gwsBaseContribution * quarterDays * 1_000;
+  }
 
   const allRows = [...rows.current, ...rows.prior];
   const latestSource = allRows.reduce<ProductionRow | null>((latest, row) => {
@@ -383,11 +436,21 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
     sodirLagMonths: sourceLagMonths,
     eventAdjustmentKboepd: round(eventAdjustment),
     eventAdjustments: eventRows.results.map((event) => ({
+      fieldKey: event.field_key,
       title: event.title,
       impactKboepd: round(Number(event.impact_kboepd)),
       confidence: event.confidence,
       source: event.source_note,
     })),
+    productionScenario: {
+      coreKboepd: round(scenarios.coreKboepd),
+      bearKboepd: round(scenarios.bearKboepd),
+      baseKboepd: round(scenarios.baseKboepd),
+      bullKboepd: round(scenarios.bullKboepd),
+      project: scenarios.project,
+    },
+    volumeAdjustmentMethod:
+      "Core event impact is applied pro-rata to product volumes until event-specific product mix is available. Q3 Garn West South base contribution is treated as crude-only.",
     soldRatio: round(soldRatio, 3),
     soldRatioSource: explicitSold
       ? `${explicitSold.signal_date}: ${explicitSold.source_note ?? "lifting signal"}`
@@ -404,12 +467,19 @@ export async function calculateNowcast(db: D1Database, quarter: string) {
     asOf: new Date().toISOString(),
     production: {
       kboepd: round(productionKboepd),
+      coreKboepd: round(coreProductionKboepd),
       baseKboepd: round(productionBase),
       eventAdjustmentKboepd: round(eventAdjustment),
       coverage: round(coverage * 100, 1),
       confidence: productionConfidence,
       latestSourceMonth: latestSource ? periodLabel(latestSource.year, latestSource.month) : null,
       sourceLagMonths,
+      scenarios: {
+        bearKboepd: round(scenarios.bearKboepd),
+        baseKboepd: round(scenarios.baseKboepd),
+        bullKboepd: round(scenarios.bullKboepd),
+        project: scenarios.project,
+      },
       fields: fieldDetail,
     },
     lifting: {
@@ -445,7 +515,7 @@ export async function saveNowcastSnapshot(db: D1Database, quarter: string) {
         crude_usd_bbl, gas_usd_boe, ngl_usd_boe, petroleum_revenue_usdm,
         production_confidence, lifting_confidence, price_confidence,
         assumptions_json, model_version
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0.2.0')`,
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '0.3.0')`,
     )
     .bind(
       quarter,
