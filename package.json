@@ -1,0 +1,18 @@
+{
+  "name": "okea-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "cf:types": "wrangler types",
+    "db:create": "wrangler d1 create okea-tracker-db",
+    "db:migrate:local": "wrangler d1 migrations apply okea-tracker-db --local",
+    "db:migrate": "wrangler d1 migrations apply okea-tracker-db --remote",
+    "dry-run": "wrangler deploy --dry-run --outdir .wrangler-dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "^4.68.0"
+  }
+}

@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="nb">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark" />
+    <meta name="description" content="OKEA Tracker - produksjon, lifting, priser, hedging og kvartals-nowcast" />
+    <title>OKEA Tracker</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">O</div>
+          <div>
+            <strong>OKEA Tracker</strong>
+            <span>Point-in-time nowcast</span>
+          </div>
+        </div>
+        <nav id="nav" class="nav">
+          <button data-view="overview" class="active">Oversikt</button>
+          <button data-view="production">Produksjon</button>
+          <button data-view="market">Olje, gass &amp; hedge</button>
+          <button data-view="nowcast">Kvartalsestimat</button>
+          <button data-view="events">Prosjekter &amp; hendelser</button>
+          <button data-view="backtest">Backtest</button>
+          <button data-view="status">Datastatus</button>
+        </nav>
+        <div class="sidebar-foot">
+          <span class="status-dot"></span>
+          <span id="sidebar-status">Kobler til...</span>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">OKEA ASA</p>
+            <h1 id="page-title">Oversikt</h1>
+          </div>
+          <div class="topbar-actions">
+            <label class="quarter-select">
+              <span>Kvartal</span>
+              <select id="quarter">
+                <option value="2026Q3">Q3 2026</option>
+                <option value="2026Q4">Q4 2026</option>
+                <option value="2027Q1">Q1 2027</option>
+              </select>
+            </label>
+            <button id="refresh" class="secondary">Oppdater</button>
+          </div>
+        </header>
+
+        <section id="loading" class="loading">Henter data...</section>
+        <section id="error" class="error-box hidden"></section>
+        <section id="content" class="content"></section>
+      </main>
+    </div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>
