@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "npm run db:migrate && wrangler deploy",
     "cf:types": "wrangler types",
     "db:create": "wrangler d1 create okea-tracker-db",
-    "db:migrate:local": "wrangler d1 migrations apply okea-tracker-db --local",
-    "db:migrate": "wrangler d1 migrations apply okea-tracker-db --remote",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate": "wrangler d1 migrations apply DB --remote",
     "dry-run": "wrangler deploy --dry-run --outdir .wrangler-dry-run"
   },
   "devDependencies": {
